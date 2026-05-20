@@ -16,10 +16,38 @@ import winreg
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from faster_whisper import WhisperModel
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
-from winotify import Notification
+
+# Register NVIDIA DLL directories before faster-whisper / CTranslate2 import.
+# The pip nvidia-cublas-cu12 and nvidia-cudnn-cu12 packages ship the DLLs but
+# don't always register them on the Windows DLL search path automatically.
+def _register_cuda_dlls() -> None:
+    if sys.platform != "win32":
+        return
+    nvidia_root = (
+        Path(__file__).resolve().parent
+        / ".venv" / "Lib" / "site-packages" / "nvidia"
+    )
+    if not nvidia_root.exists():
+        return
+    for sub in ("cublas", "cudnn", "cuda_runtime", "cuda_nvrtc"):
+        bin_dir = nvidia_root / sub / "bin"
+        if not bin_dir.exists():
+            continue
+        # Python's own DLL loader needs this for ctypes.
+        try:
+            os.add_dll_directory(str(bin_dir))
+        except OSError:
+            pass
+        # CTranslate2's native LoadLibrary calls only see PATH.
+        os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+
+
+_register_cuda_dlls()
+
+from faster_whisper import WhisperModel  # noqa: E402
+from watchdog.events import FileSystemEventHandler  # noqa: E402
+from watchdog.observers import Observer  # noqa: E402
+from winotify import Notification  # noqa: E402
 
 
 def get_desktop_path() -> Path:
@@ -275,7 +303,8 @@ def main() -> int:
 
     if not acquire_single_instance():
         log.info("Another instance is already running; exiting.")
-        return 0
+        logging.shutdown()
+        os._exit(0)
 
     log.info("Inbox:       %s", INBOX)
     log.info("Transcripts: %s", TRANSCRIPTS)
