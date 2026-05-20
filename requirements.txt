@@ -1,0 +1,5 @@
+faster-whisper>=1.1.0
+watchdog>=4.0.0
+winotify>=1.1.0
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
