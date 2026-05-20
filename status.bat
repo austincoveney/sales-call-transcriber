@@ -1,11 +1,10 @@
 @echo off
-REM Reports whether the transcriber service is currently running.
+REM Detailed status check: service state, backend, queue, recent activity.
 
 setlocal
+set "HERE=%~dp0"
 
-powershell -NoProfile -Command "if (Get-CimInstance Win32_Process -Filter \"name='pythonw.exe'\" | Where-Object { $_.CommandLine -like '*transcribe.py*' }) { Write-Host 'RUNNING' -ForegroundColor Green } else { Write-Host 'NOT RUNNING' -ForegroundColor Yellow }"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%status.ps1"
 
-echo.
-echo If NOT RUNNING, double-click run.bat to start it.
 echo.
 pause

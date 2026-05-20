@@ -135,8 +135,10 @@ All inside the folder where you extracted the tool:
 | `setup.bat`    | First-time install. Safe to re-run any time (idempotent). |
 | `run.bat`      | Manually start the service. (Normally auto-starts on login.) |
 | `stop.bat`     | Stop the service. |
-| `status.bat`   | Check whether the service is running. |
+| `status.bat`   | Detailed status: running? backend? queue depth? currently transcribing? last completed? last error? |
 | `logs.bat`     | Open the log file in Notepad. |
+
+`status.bat` is the one to use any time you're wondering whether things are working. It shows you exactly what state the service is in and what it's doing right now.
 
 ---
 
@@ -213,6 +215,22 @@ If a new version of this tool is released:
 4. Run `run.bat`
 
 ---
+
+## Reliability features
+
+The service is built to keep working without supervision. In particular:
+
+- **Periodic Inbox rescan** every 60 seconds catches any files that the Windows file-system watcher missed (which can happen under heavy I/O).
+- **De-duplication** — even if the same file is detected by both the watcher and the rescan, it'll only be queued once.
+- **Pre-flight validation** rejects 0-byte and obviously corrupt files within ~10 seconds rather than waiting for the transcription backend to fail later.
+- **OneDrive cloud-only detection** — if a file shows up in the Inbox as a cloud placeholder (i.e. you'd need to download it), the service triggers the download and waits for it to materialise. Hard cap of 10 minutes so it doesn't wait forever.
+- **Stranded-file recovery** — if the service is killed mid-transcription (Windows reboot, crash, manual stop), the file is left in `Inbox\Processing\`. On the next start, it gets moved back to `Inbox\` and retried.
+- **Single-instance lock** — clicking `run.bat` multiple times won't stack up multiple service instances; the duplicate exits immediately.
+- **Structured error reports** — every failed file produces a `.error.txt` with timestamp, file name, size, backend, error class, error message, and full Python traceback.
+- **Progress logging** — long transcriptions log a "still working" line every 60 seconds so the log doesn't look frozen.
+- **Heartbeat** — every 10 minutes when idle, the service logs `Heartbeat: idle, queue depth N`. If you can't see recent heartbeats, the service has hung.
+- **Auto-start on login** via Task Scheduler — survives reboots.
+- **Subprocess timeout** for the DirectCompute backend (Const-me/Whisper). The in-process faster-whisper backends don't have a timeout because Python threads can't be safely killed; instead, a stuck transcription is recoverable by stopping the service and starting it again.
 
 ## How it works (for the curious)
 
