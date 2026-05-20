@@ -69,12 +69,30 @@ def get_desktop_path() -> Path:
 DESKTOP = get_desktop_path()
 INBOX = DESKTOP / "Sales Calls - Inbox"
 TRANSCRIPTS = DESKTOP / "Sales Calls - Transcripts"
+PROCESSING = INBOX / "Processing"
 PROCESSED = INBOX / "Processed"
+FAILED = INBOX / "Failed"
 
 
 def ensure_folders() -> None:
-    for folder in (INBOX, TRANSCRIPTS, PROCESSED, LOG_DIR):
+    for folder in (INBOX, TRANSCRIPTS, PROCESSING, PROCESSED, FAILED, LOG_DIR):
         folder.mkdir(parents=True, exist_ok=True)
+
+
+def recover_stranded_processing() -> None:
+    """If a previous run died mid-transcription, files would be left in
+    Processing/. Move them back to Inbox so they get retried."""
+    if not PROCESSING.exists():
+        return
+    for path in PROCESSING.iterdir():
+        if not path.is_file():
+            continue
+        target = unique_path(INBOX / path.name)
+        try:
+            shutil.move(str(path), str(target))
+            log.info("Recovered stranded file from Processing: %s", path.name)
+        except Exception as exc:
+            log.warning("Could not recover %s: %s", path.name, exc)
 
 
 def is_supported(path: Path) -> bool:
@@ -351,24 +369,41 @@ def wait_until_stable(path: Path, stop_event: threading.Event) -> bool:
 
 
 def transcribe_one(transcribe_fn: TranscribeFn, audio: Path) -> None:
-    log.info("Transcribing %s", audio.name)
+    # Move to Processing/ first so the user can see the inbox is empty
+    # (work picked up) and the file is mid-flight.
+    working = unique_path(PROCESSING / audio.name)
+    shutil.move(str(audio), str(working))
+
+    size_mb = working.stat().st_size / (1024 * 1024)
+    log.info("Transcribing %s (%.1f MB)", working.name, size_mb)
+    toast("Transcribing", f"{working.name} ({size_mb:.1f} MB)")
     start = time.monotonic()
 
-    text, audio_duration = transcribe_fn(audio)
+    try:
+        text, audio_duration = transcribe_fn(working)
+    except Exception:
+        # Move to Failed/ - don't return to Inbox, that'd cause an
+        # infinite retry loop via watchdog's on_moved event.
+        try:
+            shutil.move(str(working), str(unique_path(FAILED / working.name)))
+        except Exception:
+            log.exception("Could not move %s to Failed", working.name)
+        raise
 
     if not text:
         raise RuntimeError("Backend returned an empty transcript")
 
-    out_path = unique_path(TRANSCRIPTS / f"{audio.stem}.txt")
+    out_path = unique_path(TRANSCRIPTS / f"{working.stem}.txt")
     out_path.write_text(text + "\n", encoding="utf-8")
 
-    target = unique_path(PROCESSED / audio.name)
-    shutil.move(str(audio), str(target))
+    final = unique_path(PROCESSED / working.name)
+    shutil.move(str(working), str(final))
 
     elapsed = time.monotonic() - start
     log.info(
-        "Done %s in %.1fs (audio %.1fs)",
-        audio.name, elapsed, audio_duration,
+        "Done %s in %.1fs (audio %.1fs, ratio %.1fx real-time)",
+        working.name, elapsed, audio_duration,
+        (audio_duration / elapsed) if elapsed > 0 else 0.0,
     )
     toast("Transcript ready", out_path.name)
 
@@ -419,6 +454,8 @@ def main() -> int:
 
     log.info("Inbox:       %s", INBOX)
     log.info("Transcripts: %s", TRANSCRIPTS)
+
+    recover_stranded_processing()
 
     config = load_config()
     backend = config.get("backend", "cuda")

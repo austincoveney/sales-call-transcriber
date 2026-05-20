@@ -17,10 +17,20 @@ Built for sales reps who record their calls and want to paste transcripts into C
 ## What it does
 
 1. You drop any audio file into `Desktop\Sales Calls - Inbox\`
-2. The service notices, transcribes it on your GPU (or CPU)
-3. A `.txt` transcript appears in `Desktop\Sales Calls - Transcripts\`
-4. The original audio is moved into `Sales Calls - Inbox\Processed\`
-5. A Windows toast notification confirms it's ready
+2. The service notices and immediately moves it into `Inbox\Processing\` so you can see it's been picked up. Toast: **"Transcribing yourfile.mp3 (12.4 MB)"**.
+3. It transcribes on your GPU (or CPU)
+4. A `.txt` transcript appears in `Desktop\Sales Calls - Transcripts\`
+5. The original audio moves from `Processing\` to `Inbox\Processed\`. Toast: **"Transcript ready: yourfile.txt"**.
+
+You can always tell what state things are in by glancing at the folders:
+
+| Folder                       | Means                                                     |
+|------------------------------|-----------------------------------------------------------|
+| `Inbox\`                     | Files waiting to be transcribed (queued, not started)     |
+| `Inbox\Processing\`          | The file currently being transcribed (max 1 at a time)    |
+| `Inbox\Processed\`           | Successfully transcribed — keep, archive, or delete       |
+| `Inbox\Failed\`              | Transcription failed — see paired `.error.txt` in Transcripts |
+| `Transcripts\`               | The `.txt` outputs (and any `.error.txt` files)           |
 
 The transcript is plain text — just the spoken words. Paste it into Claude or ChatGPT to identify speakers, summarise, pull objections, etc.
 
@@ -148,9 +158,16 @@ To fix this after moving:
 That's correct. The service runs hidden in the background — there's no visible window. Run `status.bat` to confirm it's running.
 
 **Nothing happens when I drop an MP3.**
-1. Run `status.bat`. If it says `NOT RUNNING`, double-click `run.bat`.
-2. If it says `RUNNING`, run `logs.bat` and look at the most recent lines — copy them to whoever set this up for you.
-3. Check the file actually landed in `Sales Calls - Inbox` and not `Sales Calls - Inbox\Processed`.
+1. Wait. A 10-minute call takes 30 sec - 3 min on GPU, much longer on CPU. Look at `Inbox\Processing\` — if your file is in there, it's being worked on right now.
+2. Run `status.bat`. If it says `NOT RUNNING`, double-click `run.bat`.
+3. If it says `RUNNING` but the file's been sitting in `Inbox\` for ages, run `logs.bat` and look at the most recent lines — copy them to whoever set this up for you.
+4. Check the file actually landed in `Inbox\` and not `Inbox\Processed\` (already done) or `Inbox\Processing\` (in progress).
+
+**Transcription seems slow.**
+The service shares your GPU with other apps. Close GPU-heavy programs (games, Chrome/Firefox with many tabs, video editors, streaming software) and try again. The log file records a "ratio Nx real-time" line — anything above 2x is healthy.
+
+**A file ended up in `Inbox\Failed\`.**
+Look in `Transcripts\` for a matching `<name>.error.txt` — it explains why. To retry, drag the file from `Failed\` back into `Inbox\`. Common causes: corrupted audio, unsupported codec, GPU out of memory.
 
 **An `.error.txt` file appears instead of a transcript.**
 Open it — it explains what went wrong. Common causes:
