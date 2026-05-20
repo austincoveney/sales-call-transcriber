@@ -1,5 +1,5 @@
 @echo off
-setlocal enableextensions
+setlocal enableextensions enabledelayedexpansion
 
 echo ==========================================
 echo  Sales Call Transcriber - Setup
@@ -21,18 +21,30 @@ if not errorlevel 1 (
     timeout /t 8 >nul
 )
 
-REM --- GPU check (warn only) -------------------------------------------
-echo Checking for NVIDIA GPU...
-powershell -NoProfile -Command "if (Get-CimInstance Win32_VideoController | Where-Object { $_.Name -like '*NVIDIA*' }) { exit 0 } else { exit 1 }" >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo WARNING: No NVIDIA GPU detected. Setup will continue but
-    echo transcription will not work without one.
-    echo.
-    timeout /t 5 >nul
-) else (
-    echo NVIDIA GPU found.
+REM --- GPU detection ---------------------------------------------------
+echo Detecting GPU...
+powershell -NoProfile -Command "(Get-CimInstance Win32_VideoController).Name | Where-Object { $_ -and $_ -notmatch 'Microsoft Basic' } | ForEach-Object { Write-Host ('  - ' + $_) }"
+
+REM Write backend choice to a temp file to avoid cmd's nightmarish escape rules.
+set "BACKEND_FILE=%TEMP%\sct_backend.txt"
+del "%BACKEND_FILE%" >nul 2>&1
+powershell -NoProfile -Command "$n = (Get-CimInstance Win32_VideoController).Name -join ';'; $b = if ($n -match 'NVIDIA|GeForce|Quadro|Tesla') { 'cuda' } elseif ($n -match 'AMD|Radeon|Intel.*Arc|Intel.*Iris.*Xe') { 'directcompute' } else { 'cpu' }; Set-Content -NoNewline -Path $env:BACKEND_FILE -Value $b"
+
+set "BACKEND="
+if exist "%BACKEND_FILE%" set /p BACKEND=<"%BACKEND_FILE%"
+del "%BACKEND_FILE%" >nul 2>&1
+
+if not defined BACKEND (
+    echo ERROR: Could not determine backend.
+    popd
+    pause
+    exit /b 1
 )
+
+if /i "%BACKEND%"=="cuda" echo Backend: cuda  ^(NVIDIA GPU via CUDA, fastest^)
+if /i "%BACKEND%"=="directcompute" echo Backend: directcompute  ^(AMD/Intel GPU via DirectX 11, near-GPU speed^)
+if /i "%BACKEND%"=="cpu" echo Backend: cpu  ^(no compatible GPU detected, will be slow^)
+echo.
 
 REM --- Python check / auto-install -------------------------------------
 set "PYTHON_CMD="
@@ -103,11 +115,45 @@ if not exist ".venv\Scripts\python.exe" (
 
 call ".venv\Scripts\activate.bat" || goto :fail
 
-REM --- Dependencies -----------------------------------------------------
+REM --- Backend-specific dependencies -----------------------------------
 echo.
-echo Installing dependencies. First run downloads ~2GB and may take 5-15 min.
+echo Installing dependencies for backend: %BACKEND%
+echo First-time install downloads ^~2GB and may take 5-15 min.
 python -m pip install --upgrade pip || goto :fail
-python -m pip install -r requirements.txt || goto :fail
+python -m pip install -r "requirements_%BACKEND%.txt" || goto :fail
+
+REM --- DirectCompute extras: binary + model ----------------------------
+if /i "%BACKEND%"=="directcompute" (
+    echo.
+    echo Downloading Const-me/Whisper CLI...
+    if not exist "bin" mkdir "bin"
+    set "CLI_ZIP=%TEMP%\const-me-cli.zip"
+    powershell -NoProfile -Command "try { Invoke-WebRequest -Uri 'https://github.com/Const-me/Whisper/releases/download/1.12.0/cli.zip' -OutFile '!CLI_ZIP!' -UseBasicParsing; Expand-Archive -Force -Path '!CLI_ZIP!' -DestinationPath '%HERE%bin'; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+    if errorlevel 1 (
+        echo ERROR: Failed to download Const-me/Whisper CLI.
+        goto :fail
+    )
+    del "!CLI_ZIP!" >nul 2>&1
+    echo CLI installed at %HERE%bin\main.exe
+
+    echo.
+    echo Downloading ggml-large-v3 model ^(~3.1GB, one-time^)...
+    if not exist "models" mkdir "models"
+    if not exist "models\ggml-large-v3.bin" (
+        powershell -NoProfile -Command "try { Invoke-WebRequest -Uri 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin' -OutFile '%HERE%models\ggml-large-v3.bin' -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+        if errorlevel 1 (
+            echo ERROR: Failed to download model.
+            goto :fail
+        )
+    ) else (
+        echo Model already present, skipping download.
+    )
+)
+
+REM --- Write config.json -----------------------------------------------
+echo.
+echo Writing config.json...
+powershell -NoProfile -Command "@{ backend = '%BACKEND%'; gpu_names = '%GPU_NAMES%'; setup_at = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'); install_dir = '%HERE%' } | ConvertTo-Json | Set-Content -Encoding UTF8 -Path 'config.json'"
 
 REM --- Desktop folders (OneDrive-aware) --------------------------------
 for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKTOP=%%D"
@@ -118,14 +164,16 @@ if not exist "%DESKTOP%\Sales Calls - Inbox\Processed"  mkdir "%DESKTOP%\Sales C
 if not exist "%DESKTOP%\Sales Calls - Transcripts"      mkdir "%DESKTOP%\Sales Calls - Transcripts"
 echo Created desktop folders.
 
-REM --- Pre-download Whisper model --------------------------------------
-echo.
-echo Downloading Whisper large-v3 model (~3GB, one-time)...
-python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='cuda', compute_type='float16')" || (
+REM --- Pre-download Whisper model (CUDA/CPU only) ----------------------
+if /i "%BACKEND%"=="cuda" (
     echo.
-    echo WARNING: Model preload failed. This usually means CUDA isn't set up.
-    echo The service will still install, but transcription won't work until
-    echo an NVIDIA GPU driver is installed.
+    echo Downloading Whisper large-v3 model ^(~3GB, one-time^)...
+    python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='cuda', compute_type='float16')" || echo WARNING: Model preload failed. Transcription won't work until CUDA is properly set up.
+)
+if /i "%BACKEND%"=="cpu" (
+    echo.
+    echo Downloading Whisper medium model ^(~1.5GB, one-time^)...
+    python -c "from faster_whisper import WhisperModel; WhisperModel('medium', device='cpu', compute_type='int8')" || echo WARNING: Model preload failed.
 )
 
 REM --- Task Scheduler auto-start ---------------------------------------
@@ -141,7 +189,7 @@ if errorlevel 1 (
 
 echo.
 echo ==========================================
-echo  Done.
+echo  Done.  Backend: %BACKEND%
 echo ==========================================
 echo.
 echo - Service auto-starts at next Windows login.

@@ -1,6 +1,14 @@
 # Sales Call Transcriber
 
-A silent Windows background service. Drop sales call MP3s in a desktop folder, plain-text transcripts appear in another. Runs locally on your PC using OpenAI's Whisper model on an NVIDIA GPU — no cloud, no per-minute fees, no audio leaves your machine.
+A silent Windows background service. Drop sales call MP3s in a desktop folder, plain-text transcripts appear in another. Runs locally on your PC — no cloud, no per-minute fees, no audio leaves your machine.
+
+Auto-detects your GPU and picks the best backend:
+
+| GPU                          | Backend         | What it uses                                  | Speed (rough) |
+|------------------------------|-----------------|-----------------------------------------------|----------------|
+| NVIDIA (RTX 20-series+)      | `cuda`          | faster-whisper + CUDA, large-v3 model         | 4-10× real-time |
+| AMD Radeon / Intel Arc       | `directcompute` | Const-me/Whisper + DirectX 11, large-v3 model | 2-5× real-time |
+| No compatible GPU            | `cpu`           | faster-whisper CPU, medium int8 model         | 0.5-1× real-time |
 
 Built for sales reps who record their calls and want to paste transcripts into ChatGPT/Claude for analysis (summary, objections, next steps, etc.).
 
@@ -9,7 +17,7 @@ Built for sales reps who record their calls and want to paste transcripts into C
 ## What it does
 
 1. You drop any audio file into `Desktop\Sales Calls - Inbox\`
-2. The service notices, transcribes it on your GPU (~30-90 seconds for a 10-minute call)
+2. The service notices, transcribes it on your GPU (or CPU)
 3. A `.txt` transcript appears in `Desktop\Sales Calls - Transcripts\`
 4. The original audio is moved into `Sales Calls - Inbox\Processed\`
 5. A Windows toast notification confirms it's ready
@@ -23,13 +31,11 @@ The transcript is plain text — just the spoken words. Paste it into Claude or 
 ## Requirements
 
 - **Windows 10 or 11**
-- **NVIDIA GPU** with recent drivers (RTX 20-series or newer recommended)
-- About **5 GB of free disk space** (for dependencies + the Whisper model)
+- About **5 GB of free disk space** (for dependencies + the Whisper model). The DirectCompute backend needs an additional ~3 GB for its model.
 - An internet connection for the one-time install
+- For the **fastest** experience: an NVIDIA GPU (RTX 20-series or newer) with recent drivers. AMD Radeon (RX 5000+) and Intel Arc also work via the DirectCompute backend at slightly lower speeds. With no GPU, it falls back to CPU — works on anything but a 10-min call may take 10+ minutes to transcribe.
 
 You do **not** need Python, Git, or any developer tooling — `setup.bat` installs Python automatically if it's missing.
-
-If you don't have an NVIDIA GPU, this won't work — open an issue or ask the maintainer about a CPU-only build.
 
 ---
 
@@ -45,11 +51,11 @@ If you don't have an NVIDIA GPU, this won't work — open an issue or ask the ma
 
 **One thing to avoid:** don't extract it inside a OneDrive-synced folder (like `OneDrive\Documents`). The Python environment is ~3 GB and OneDrive will try to upload it. Plain `Downloads\` or `C:\Tools\` is ideal.
 
-### Step 2 — Update your NVIDIA driver (skip if you're already on a recent driver)
+### Step 2 — Update your GPU driver (skip if you're already on a recent driver)
 
-1. Go to **https://www.nvidia.com/Download/index.aspx**
-2. Pick your GPU model from the dropdowns and download the latest driver
-3. Run the installer, accept defaults
+- **NVIDIA:** https://www.nvidia.com/Download/index.aspx — pick your model, download, install.
+- **AMD:** https://www.amd.com/en/support — same idea.
+- **Intel Arc:** https://www.intel.com/content/www/us/en/download-center/home.html
 
 If you're not sure what GPU you have: press <kbd>Win</kbd>+<kbd>R</kbd>, type `dxdiag`, press Enter, click the **Display** tab, look at the **Name** field.
 
@@ -58,14 +64,16 @@ If you're not sure what GPU you have: press <kbd>Win</kbd>+<kbd>R</kbd>, type `d
 1. Open the extracted folder in File Explorer
 2. **Double-click `setup.bat`**
 3. A black window appears and starts working. **Leave it alone** — this takes 5 to 20 minutes the first time. It will:
-   - Check for an NVIDIA GPU (warns if missing)
+   - Detect your GPU and pick a backend (`cuda` / `directcompute` / `cpu`)
    - Install Python 3.12 automatically if you don't have Python (uses winget if available, otherwise downloads the official installer from python.org)
    - Create a Python environment inside the folder
-   - Download ~2 GB of dependencies
-   - Download the ~3 GB Whisper speech recognition model
+   - Install backend-specific dependencies (~1-2 GB)
+   - Download the Whisper model (~3 GB for `cuda` and `directcompute`, ~1.5 GB for `cpu`)
+   - For the `directcompute` backend: also download the Const-me/Whisper CLI binary (small)
+   - Write a `config.json` recording the chosen backend
    - Create the desktop folders
    - Register the service to auto-start when you log in
-4. When you see `Done.` and `Press any key to continue...`, press any key.
+4. When you see `Done.  Backend: <name>` and `Press any key to continue...`, press any key.
 
 If anything fails, the window stays open with the error message. Copy it and send it to whoever set this up for you.
 
@@ -191,13 +199,42 @@ If a new version of this tool is released:
 
 ## How it works (for the curious)
 
-- **faster-whisper** runs OpenAI's Whisper `large-v3` speech recognition model on your GPU via CTranslate2. About 10× faster than the official Python implementation.
+**Backend selection** — `setup.bat` queries `Win32_VideoController` via WMI to find every GPU, then picks:
+
+- `cuda` if any GPU name matches NVIDIA / GeForce / Quadro / Tesla
+- `directcompute` if any matches AMD / Radeon / Intel Arc / Intel Iris Xe
+- `cpu` otherwise
+
+The choice is written to `config.json`. `transcribe.py` reads it on startup and dispatches to the right backend implementation.
+
+**The three backends:**
+
+- **`cuda`** uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — a CTranslate2 port of OpenAI's Whisper that runs the `large-v3` model on NVIDIA GPUs. ~10× faster than the reference implementation. We register the pip-installed cuBLAS / cuDNN DLL directories on the Windows search path at startup so it works without a system-wide CUDA install.
+- **`directcompute`** uses [Const-me/Whisper](https://github.com/Const-me/Whisper) — a high-performance DirectX 11 / DirectCompute port of Whisper that runs on any modern Windows GPU (AMD, Intel, NVIDIA). We shell out to its `main.exe` after converting input audio to 16 kHz mono WAV with PyAV.
+- **`cpu`** uses faster-whisper in CPU mode with the smaller `medium` model and `int8` quantisation. Slower but works on any hardware.
+
+**Watch-folder pipeline:**
+
 - **watchdog** watches the Inbox folder for new files using Windows file system events (no polling).
-- A single worker thread pulls from a queue and transcribes one file at a time. Files are checked for size stability before processing (so partially-copied files aren't picked up).
+- A single worker thread pulls from a queue and transcribes one file at a time. Files are checked for size stability before processing so partially-copied files aren't picked up.
 - A named Windows mutex (`Local\SalesCallTranscriberSingleInstance`) prevents multiple instances stacking up if `run.bat` is clicked more than once.
-- The script registers the NVIDIA cuBLAS / cuDNN DLL directories on the Windows search path at startup, so the pip-installed `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` packages work without a system-wide CUDA install.
 - Logs go to `logs/transcribe.log`, rotating at 2 MB.
-- Auto-start uses Windows Task Scheduler (`schtasks /SC ONLOGON`) with an absolute path to the install folder.
+- Auto-start uses Windows Task Scheduler (`Register-ScheduledTask`) with an absolute path to the install folder.
 - All paths are resolved from `Path(__file__).parent` and `%~dp0`, so the tool works from any location.
+
+**Overriding the backend** — edit `config.json` manually if auto-detection picks wrong, or if you want to force a specific model. Valid keys:
+
+```json
+{
+    "backend": "cuda | directcompute | cpu",
+    "model_size": "tiny | base | small | medium | large-v3",
+    "compute_type": "int8 | int8_float16 | float16 | float32",
+    "model_path": "absolute path to ggml-*.bin (directcompute only)",
+    "exe_path": "absolute path to Const-me/Whisper main.exe (directcompute only)",
+    "gpu_hint": "GPU adapter name to force (directcompute only, e.g. 'AMD Radeon RX 7900 XT')"
+}
+```
+
+Restart the service after editing (`stop.bat` then `run.bat`).
 
 Everything runs locally. No audio or transcript ever leaves your PC.
