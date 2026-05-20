@@ -1,6 +1,10 @@
 @echo off
-REM Stops any running transcriber processes.
+REM Stops the transcriber service if it's running.
 
-taskkill /F /IM pythonw.exe /FI "WINDOWTITLE eq Sales Call*" >nul 2>&1
-wmic process where "name='pythonw.exe' and commandline like '%%transcribe.py%%'" delete >nul 2>&1
-echo Stopped.
+setlocal
+
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='pythonw.exe'\" | Where-Object { $_.CommandLine -like '*transcribe.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+
+echo Stopped any running transcriber instances.
+echo.
+timeout /t 2 /nobreak >nul

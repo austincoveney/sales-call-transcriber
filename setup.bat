@@ -37,8 +37,10 @@ echo Installing dependencies. First run downloads ~2GB and may take 5-15 min.
 python -m pip install --upgrade pip || goto :fail
 python -m pip install -r requirements.txt || goto :fail
 
-REM --- Desktop folders --------------------------------------------------
-set "DESKTOP=%USERPROFILE%\Desktop"
+REM --- Desktop folders (OneDrive-aware) ---------------------------------
+for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKTOP=%%D"
+if "%DESKTOP%"=="" set "DESKTOP=%USERPROFILE%\Desktop"
+echo Desktop resolved to: %DESKTOP%
 if not exist "%DESKTOP%\Sales Calls - Inbox"            mkdir "%DESKTOP%\Sales Calls - Inbox"
 if not exist "%DESKTOP%\Sales Calls - Inbox\Processed"  mkdir "%DESKTOP%\Sales Calls - Inbox\Processed"
 if not exist "%DESKTOP%\Sales Calls - Transcripts"      mkdir "%DESKTOP%\Sales Calls - Transcripts"
@@ -76,6 +78,12 @@ echo - To check it's working: drop an MP3 into
 echo     %DESKTOP%\Sales Calls - Inbox
 echo - Transcripts appear in:
 echo     %DESKTOP%\Sales Calls - Transcripts
+echo.
+echo Helpers:
+echo   run.bat     - start the service now (or after restart)
+echo   stop.bat    - stop a running service
+echo   status.bat  - check whether it's running
+echo   logs.bat    - open the log file
 echo.
 popd
 pause
