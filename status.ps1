@@ -94,9 +94,11 @@ if ($queuedFiles) {
     if ($extra -gt 0) { Write-Host ("  ... and {0} more" -f $extra) }
 }
 
-# Recent activity from the log
+# Recent activity from the log. Tail enough lines to include the last
+# heartbeat (every 10 min) plus any completion events. 1000 lines covers
+# ~7 days of idle heartbeats which is plenty.
 if (Test-Path $logPath) {
-    $recentLog = Get-Content -Path $logPath -Tail 200 -ErrorAction SilentlyContinue
+    $recentLog = Get-Content -Path $logPath -Tail 1000 -ErrorAction SilentlyContinue
     $lastDone = $recentLog | Where-Object { $_ -match 'Done\s+' } | Select-Object -Last 1
     $lastHeartbeat = $recentLog | Where-Object { $_ -match 'Heartbeat' } | Select-Object -Last 1
     $lastError = $recentLog | Where-Object { $_ -match '\[ERROR\]' } | Select-Object -Last 1

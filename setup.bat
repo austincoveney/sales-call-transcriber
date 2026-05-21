@@ -25,14 +25,19 @@ REM --- GPU detection ---------------------------------------------------
 echo Detecting GPU...
 powershell -NoProfile -Command "(Get-CimInstance Win32_VideoController).Name | Where-Object { $_ -and $_ -notmatch 'Microsoft Basic' } | ForEach-Object { Write-Host ('  - ' + $_) }"
 
-REM Write backend choice to a temp file to avoid cmd's nightmarish escape rules.
+REM Write backend choice + raw GPU names to temp files. Using files
+REM dodges cmd's escape rules around pipe characters and parentheses
+REM that show up in GPU names like "Intel(R) Arc(TM) ... (16GB)".
 set "BACKEND_FILE=%TEMP%\sct_backend.txt"
-del "%BACKEND_FILE%" >nul 2>&1
-powershell -NoProfile -Command "$n = (Get-CimInstance Win32_VideoController).Name -join ';'; $b = if ($n -match 'NVIDIA|GeForce|Quadro|Tesla') { 'cuda' } elseif ($n -match 'AMD|Radeon|Intel.*Arc|Intel.*Iris.*Xe') { 'directcompute' } else { 'cpu' }; Set-Content -NoNewline -Path $env:BACKEND_FILE -Value $b"
+set "GPU_NAMES_FILE=%TEMP%\sct_gpu_names.txt"
+del "%BACKEND_FILE%" "%GPU_NAMES_FILE%" >nul 2>&1
+powershell -NoProfile -Command "$names = (Get-CimInstance Win32_VideoController).Name | Where-Object { $_ -and $_ -notmatch 'Microsoft Basic' }; $n = $names -join ';'; $b = if ($n -match 'NVIDIA|GeForce|Quadro|Tesla') { 'cuda' } elseif ($n -match 'AMD|Radeon|Intel.*Arc|Intel.*Iris.*Xe') { 'directcompute' } else { 'cpu' }; Set-Content -NoNewline -Encoding ASCII -Path $env:BACKEND_FILE -Value $b; Set-Content -NoNewline -Encoding ASCII -Path $env:GPU_NAMES_FILE -Value $n"
 
 set "BACKEND="
+set "GPU_NAMES="
 if exist "%BACKEND_FILE%" set /p BACKEND=<"%BACKEND_FILE%"
-del "%BACKEND_FILE%" >nul 2>&1
+if exist "%GPU_NAMES_FILE%" set /p GPU_NAMES=<"%GPU_NAMES_FILE%"
+del "%BACKEND_FILE%" "%GPU_NAMES_FILE%" >nul 2>&1
 
 if not defined BACKEND (
     echo ERROR: Could not determine backend.
@@ -151,16 +156,21 @@ if /i "%BACKEND%"=="directcompute" (
 )
 
 REM --- Write config.json -----------------------------------------------
+REM Pass values via env vars so paths/GPU names with parens, semicolons
+REM or other punctuation can't confuse PowerShell's parser.
 echo.
 echo Writing config.json...
-powershell -NoProfile -Command "@{ backend = '%BACKEND%'; gpu_names = '%GPU_NAMES%'; setup_at = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'); install_dir = '%HERE%' } | ConvertTo-Json | Set-Content -Encoding UTF8 -Path 'config.json'"
+set "INSTALL_DIR=%HERE%"
+powershell -NoProfile -Command "@{ backend = $env:BACKEND; gpu_names = $env:GPU_NAMES; setup_at = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'); install_dir = $env:INSTALL_DIR } | ConvertTo-Json | Set-Content -Encoding UTF8 -Path 'config.json'"
 
 REM --- Desktop folders (OneDrive-aware) --------------------------------
 for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKTOP=%%D"
 if "%DESKTOP%"=="" set "DESKTOP=%USERPROFILE%\Desktop"
 echo Desktop resolved to: %DESKTOP%
 if not exist "%DESKTOP%\Sales Calls - Inbox"            mkdir "%DESKTOP%\Sales Calls - Inbox"
+if not exist "%DESKTOP%\Sales Calls - Inbox\Processing" mkdir "%DESKTOP%\Sales Calls - Inbox\Processing"
 if not exist "%DESKTOP%\Sales Calls - Inbox\Processed"  mkdir "%DESKTOP%\Sales Calls - Inbox\Processed"
+if not exist "%DESKTOP%\Sales Calls - Inbox\Failed"     mkdir "%DESKTOP%\Sales Calls - Inbox\Failed"
 if not exist "%DESKTOP%\Sales Calls - Transcripts"      mkdir "%DESKTOP%\Sales Calls - Transcripts"
 echo Created desktop folders.
 

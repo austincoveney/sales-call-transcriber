@@ -533,9 +533,19 @@ def _build_error_report(
     )
 
 
-def transcribe_one(transcribe_fn: TranscribeFn, audio: Path, *, backend: str) -> float:
+def transcribe_one(
+    transcribe_fn: TranscribeFn,
+    audio: Path,
+    *,
+    backend: str,
+    dispatcher: "Dispatcher | None" = None,
+) -> float:
     """Move audio through Processing -> Processed and return the captured
-    size in MB so the caller can put it in error reports if needed."""
+    size in MB so the caller can put it in error reports if needed.
+    If dispatcher is provided, releases the inbox-path tracking the
+    moment the file is moved out of Inbox so a fresh drop at the same
+    name can be re-queued without waiting for this transcription to
+    finish."""
     # Capture size BEFORE moving so error reports get a real number even
     # if the file ends up in Failed/.
     size_mb = audio.stat().st_size / (1024 * 1024)
@@ -544,6 +554,8 @@ def transcribe_one(transcribe_fn: TranscribeFn, audio: Path, *, backend: str) ->
     # (work picked up) and the file is mid-flight.
     working = unique_path(PROCESSING / audio.name)
     shutil.move(str(audio), str(working))
+    if dispatcher is not None:
+        dispatcher.release(audio)
 
     log.info("Transcribing %s (%.1f MB)", working.name, size_mb)
     if size_mb > MAX_AUDIO_MB_WARNING:
@@ -660,10 +672,20 @@ class Dispatcher:
         except queue.Empty:
             return None
 
-    def done(self, path: Path) -> None:
+    def release(self, path: Path) -> None:
+        """Drop the path from the in-flight tracker. Idempotent.
+        Call this once the file is no longer at its original Inbox path
+        (e.g. after we move it to Processing/) so a fresh drop at the
+        same name can be re-queued instead of being mistaken for a
+        duplicate."""
         key = str(path.resolve()).lower()
         with self._lock:
             self._known.discard(key)
+
+    def done(self, path: Path) -> None:
+        """Mark work item complete: release tracking + decrement queue
+        counter. Safe to call even if release() was already invoked."""
+        self.release(path)
         self._queue.task_done()
 
     def depth(self) -> int:
@@ -684,6 +706,12 @@ def worker_loop(
         original_size_mb = 0.0
         try:
             if not audio.exists():
+                # File was queued but then removed (deleted, manually
+                # moved, OneDrive sync glitch). Log and drop quietly.
+                log.info(
+                    "File no longer in inbox by the time worker picked it up: %s",
+                    original_name,
+                )
                 continue
 
             stable_ok, reason = wait_until_stable(audio, stop_event)
@@ -731,7 +759,10 @@ def worker_loop(
                 toast("Transcription failed", audio.name)
                 continue
 
-            transcribe_one(transcribe_fn, audio, backend=backend_name)
+            transcribe_one(
+                transcribe_fn, audio,
+                backend=backend_name, dispatcher=dispatcher,
+            )
 
         except Exception as exc:
             log.exception("Failed to transcribe %s", original_name)
